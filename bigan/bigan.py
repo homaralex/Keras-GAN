@@ -1,5 +1,8 @@
 from __future__ import print_function, division
 
+import argparse
+
+import h5py
 from keras.datasets import mnist
 from keras.layers import Input, Dense, Reshape, Flatten, Dropout, multiply, GaussianNoise
 from keras.layers import BatchNormalization, Activation, Embedding, ZeroPadding2D
@@ -15,38 +18,40 @@ import keras.backend as K
 import matplotlib.pyplot as plt
 
 import numpy as np
+import os
+
 
 class BIGAN():
     def __init__(self):
-        self.img_rows = 28 
-        self.img_cols = 28
-        self.channels = 1
+        self.img_rows = 64
+        self.img_cols = 64
+        self.channels = 3
         self.img_shape = (self.img_rows, self.img_cols, self.channels)
-        self.latent_dim = 100
+        self.latent_dim = 64
 
         optimizer = Adam(0.0002, 0.5)
 
         # Build and compile the discriminator
         self.discriminator = self.build_discriminator()
-        self.discriminator.compile(loss=['binary_crossentropy'], 
-            optimizer=optimizer,
-            metrics=['accuracy'])
+        self.discriminator.compile(loss=['binary_crossentropy'],
+                                   optimizer=optimizer,
+                                   metrics=['accuracy'])
 
         # Build and compile the generator
         self.generator = self.build_generator()
-        self.generator.compile(loss=['binary_crossentropy'], 
-            optimizer=optimizer)
+        self.generator.compile(loss=['binary_crossentropy'],
+                               optimizer=optimizer)
 
         # Build and compile the encoder
         self.encoder = self.build_encoder()
-        self.encoder.compile(loss=['binary_crossentropy'], 
-            optimizer=optimizer)
+        self.encoder.compile(loss=['binary_crossentropy'],
+                             optimizer=optimizer)
 
         # The part of the bigan that trains the discriminator and encoder
         self.discriminator.trainable = False
 
         # Generate image from samples noise
-        z = Input(shape=(self.latent_dim, ))
+        z = Input(shape=(self.latent_dim,))
         img_ = self.generator(z)
 
         # Encode image
@@ -60,8 +65,10 @@ class BIGAN():
         # Set up and compile the combined model
         self.bigan_generator = Model([z, img], [fake, valid])
         self.bigan_generator.compile(loss=['binary_crossentropy', 'binary_crossentropy'],
-            optimizer=optimizer)
+                                     optimizer=optimizer)
 
+        self.last_epoch = 0
+        self.random_samples = None
 
     def build_encoder(self):
         model = Sequential()
@@ -103,10 +110,10 @@ class BIGAN():
 
     def build_discriminator(self):
 
-        z = Input(shape=(self.latent_dim, ))
+        z = Input(shape=(self.latent_dim,))
         img = Input(shape=self.img_shape)
         d_in = concatenate([z, Flatten()(img)])
-        
+
         model = Dense(1024)(d_in)
         model = LeakyReLU(alpha=0.2)(model)
         model = Dropout(0.5)(model)
@@ -120,19 +127,17 @@ class BIGAN():
 
         return Model([z, img], validity)
 
-    def train(self, epochs, batch_size=128, save_interval=50):
+    def train(self, dataset_path, epochs, batch_size=128, save_interval=50):
 
         # Load the dataset
-        (X_train, _), (_, _) = mnist.load_data()
-
-        # Rescale -1 to 1
-        X_train = (X_train.astype(np.float32) - 127.5) / 127.5
-        X_train = np.expand_dims(X_train, axis=3)
+        h5_file = h5py.File(dataset_path)
+        dset = h5_file['images']
+        X_train = dset[:100000]
 
         half_batch = int(batch_size / 2)
 
-        for epoch in range(epochs):
-
+        d_losses, g_losses, losses_ratio = [], [], []
+        for epoch in range(self.last_epoch + 1, epochs):
 
             # ---------------------
             #  Train Discriminator
@@ -173,37 +178,78 @@ class BIGAN():
             g_loss = self.bigan_generator.train_on_batch([z, imgs], [valid, fake])
 
             # Plot the progress
-            print ("%d [D loss: %f, acc: %.2f%%] [G loss: %f]" % (epoch, d_loss[0], 100*d_loss[1], g_loss[0]))
+            print("%d [D loss: %f, acc: %.2f%%] [G loss: %f]" % (epoch, d_loss[0], 100 * d_loss[1], g_loss[0]))
+            if epoch % 100 == 0:
+                g_losses.append(g_loss[0])
+                d_losses.append(d_loss[0])
+                losses_ratio.append(g_loss[0] / d_loss[0])
+                self.save_losses_hist(g_losses, d_losses, losses_ratio)
 
             # If at save interval => save generated image samples
             if epoch % save_interval == 0:
-                # Select a random half batch of images
+                print('Saving weights and images')
                 self.save_imgs(epoch)
+                self.save_weights(epoch)
 
     def save_imgs(self, epoch):
         r, c = 5, 5
-        z = np.random.normal(size=(25, self.latent_dim))
-        gen_imgs = self.generator.predict(z)
+        if self.random_samples is None:
+            self.random_samples = np.random.normal(size=(25, self.latent_dim))
+        gen_imgs = self.generator.predict(self.random_samples)
 
-        gen_imgs = 0.5 * gen_imgs + 0.5
+        # Rescale images 0 - 1
+        gen_imgs = 0.5 * gen_imgs + 1
+        gen_imgs = np.clip(gen_imgs, 0, 1)
 
         fig, axs = plt.subplots(r, c)
         cnt = 0
         for i in range(r):
             for j in range(c):
-                axs[i,j].imshow(gen_imgs[cnt, :,:,0], cmap='gray')
-                axs[i,j].axis('off')
+                axs[i, j].imshow(gen_imgs[cnt, :, :, :])
+                axs[i, j].axis('off')
                 cnt += 1
-        fig.savefig("bigan/images/mnist_%d.png" % epoch)
+        fig.savefig("bigan/images/bbc_%d.png" % epoch)
         plt.close()
+
+    def save_losses_hist(self, g_losses, d_losses, losses_ratio):
+        out_dir = 'bigan'
+        plt.plot(g_losses, label='Gen')
+        plt.plot(d_losses, label='Dis')
+        plt.legend()
+        plt.savefig(os.path.join(out_dir, 'loss_hist.png'))
+        plt.close()
+
+        plt.plot(losses_ratio, label='G / D')
+        plt.legend()
+        plt.savefig(os.path.join(out_dir, 'losses_ratio.png'))
+        plt.close()
+
+    def save_weights(self, epoch):
+        self.generator.save_weights('bigan/generator.hdf5')
+        self.encoder.save_weights('bigan/encoder.hdf5')
+        self.discriminator.save_weights('bigan/discriminator.hdf5')
+
+        with h5py.File("bigan/generator.hdf5", "r+") as f:
+            f.attrs.create('last_epoch', epoch)
+
+    def load_weights(self):
+        self.generator.load_weights('bigan/generator.hdf5')
+        self.encoder.load_weights('bigan/encoder.hdf5')
+        self.discriminator.load_weights('bigan/discriminator.hdf5')
+
+        with h5py.File("bigan/generator.hdf5", "r") as f:
+            self.last_epoch = f.attrs.get('last_epoch', 0)
 
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='BiGAN')
+    parser.add_argument('--dataset_path', type=str, default='/home/alex/datasets/bbc_full_r_pr.hdf5')
+    parser.add_argument('--batch_size', type=int, default=128)
+    parser.add_argument('--epochs', type=int, default=1000000000)
+    parser.add_argument('--resume', action='store_true')
+    args = parser.parse_args()
+
     bigan = BIGAN()
-    bigan.train(epochs=40000, batch_size=32, save_interval=400)
-
-
-
-
-
-
+    if args.resume:
+        bigan.load_weights()
+    bigan.train(dataset_path=args.dataset_path, epochs=args.epochs, batch_size=args.batch_size, save_interval=200)
