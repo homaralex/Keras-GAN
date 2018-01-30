@@ -350,9 +350,10 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--epochs', type=int, default=1000000000)
     parser.add_argument('--resume', action='store_true')
+    parser.add_argument('--improved', action='store_true')
     args = parser.parse_args()
 
-    wgan = WGAN(batch_size=args.batch_size, improved=True)
+    wgan = WGAN(batch_size=args.batch_size, improved=args.improved)
     if args.resume:
         wgan.load_weights()
     wgan.train(dataset_path=args.dataset_path, epochs=args.epochs, save_interval=200)
