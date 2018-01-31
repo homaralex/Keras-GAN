@@ -208,9 +208,9 @@ class BIGAN():
                     fake = np.zeros((batch_size, 1))
 
                     # Train the generator (z -> img is valid and img -> z is is invalid)
-                    for _ in range(50):
+                    for _ in range(20):
                         g_loss = self.bigan_generator.train_on_batch([z, imgs], [valid, fake])
-                        if g_loss[0] < 5:
+                        if g_loss[0] < 4.1:
                             break
 
                     # Plot the progress
@@ -242,7 +242,7 @@ class BIGAN():
         cnt = 0
         for i in range(r):
             for j in range(c):
-                axs[i, j].imshow(gen_imgs[cnt, :, :, :])
+                axs[i, j].imshow(gen_imgs[cnt, :, :, :], vmin=0.0, vmax=1.0)
                 axs[i, j].axis('off')
                 cnt += 1
         fig.savefig("bigan/images/bbc_{}.png".format(epoch))

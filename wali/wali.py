@@ -22,6 +22,10 @@ import os
 
 from matplotlib import gridspec
 
+from wgan.wgan import wasserstein_loss
+
+SEGMENT_SIZE = 100 * 1000
+
 
 class WALI():
     def __init__(self):
@@ -35,23 +39,27 @@ class WALI():
         self.img_shape = (self.img_rows, self.img_cols, self.channels)
         self.latent_dim = 64
 
+        # Following parameter and optimizer set as recommended in paper
+        self.n_critic = 5
+        self.clip_value = 0.01
+
         def optimizer():
-            return Adam(0.0002, 0.5)
+            return Adam(0.0001, beta_1=0.5, beta_2=0.9)
 
         # Build and compile the discriminator
         self.discriminator = self.build_discriminator()
-        self.discriminator.compile(loss=['binary_crossentropy'],
+        self.discriminator.compile(loss=[wasserstein_loss],
                                    optimizer=optimizer(),
                                    metrics=['accuracy'])
 
         # Build and compile the generator
         self.generator = self.build_generator()
-        self.generator.compile(loss=['binary_crossentropy'],
+        self.generator.compile(loss=[wasserstein_loss],
                                optimizer=optimizer())
 
         # Build and compile the encoder
         self.encoder = self.build_encoder()
-        self.encoder.compile(loss=['binary_crossentropy'],
+        self.encoder.compile(loss=[wasserstein_loss],
                              optimizer=optimizer())
 
         # The part of the bigan that trains the discriminator and encoder
@@ -71,7 +79,7 @@ class WALI():
 
         # Set up and compile the combined model
         self.bigan_generator = Model([z, img], [fake, valid])
-        self.bigan_generator.compile(loss=['binary_crossentropy', 'binary_crossentropy'],
+        self.bigan_generator.compile(loss=[wasserstein_loss, wasserstein_loss],
                                      optimizer=optimizer())
 
     def build_encoder(self):
@@ -161,67 +169,76 @@ class WALI():
         # Load the dataset
         h5_file = h5py.File(dataset_path)
         dset = h5_file['images']
-        X_train = dset[:100000]
 
         half_batch = int(batch_size / 2)
-
         d_losses, g_losses, losses_ratio = [], [], []
         for epoch in range(self.last_epoch + 1, epochs):
+            for segment_id in range(dset.shape[0] // SEGMENT_SIZE):
+                print('Loading segment {}'.format(segment_id))
+                X_train = dset[segment_id * SEGMENT_SIZE: (segment_id + 1) * SEGMENT_SIZE]
+                for iter_id in range(SEGMENT_SIZE // half_batch):
+                    for critic_iter in range(self.n_critic):
+                        # ---------------------
+                        #  Train Discriminator
+                        # ---------------------
 
-            # ---------------------
-            #  Train Discriminator
-            # ---------------------
+                        # Sample noise and generate img
+                        z = np.random.normal(size=(half_batch, self.latent_dim))
+                        imgs_ = self.generator.predict(z)
 
-            # Sample noise and generate img
-            z = np.random.normal(size=(half_batch, self.latent_dim))
-            imgs_ = self.generator.predict(z)
+                        # Select a random half batch of images and encode
+                        idx = np.random.randint(0, X_train.shape[0], half_batch)
+                        imgs = X_train[idx]
+                        z_ = self.encoder.predict(imgs)
 
-            # Select a random half batch of images and encode
-            idx = np.random.randint(0, X_train.shape[0], half_batch)
-            imgs = X_train[idx]
-            z_ = self.encoder.predict(imgs)
+                        positive_y = np.ones((half_batch, 1))
+                        negative_y = -np.ones((half_batch, 1))
 
-            valid = np.ones((half_batch, 1))
-            fake = np.zeros((half_batch, 1))
+                        # Train the discriminator (img -> z is valid, z -> img is fake)
+                        d_loss_real = self.discriminator.train_on_batch([z_, imgs], positive_y)
+                        d_loss_fake = self.discriminator.train_on_batch([z, imgs_], negative_y)
+                        d_loss = 0.5 * np.add(d_loss_real, d_loss_fake)
 
-            # Train the discriminator (img -> z is valid, z -> img is fake)
-            d_loss_real = self.discriminator.train_on_batch([z_, imgs], valid)
-            d_loss_fake = self.discriminator.train_on_batch([z, imgs_], fake)
-            d_loss = 0.5 * np.add(d_loss_real, d_loss_fake)
+                        # Clip discriminator weights
+                        for l in self.discriminator.layers:
+                            weights = l.get_weights()
+                            weights = [np.clip(w, -self.clip_value, self.clip_value) for w in weights]
+                            l.set_weights(weights)
 
-            # ---------------------
-            #  Train Generator
-            # ---------------------
+                    # ---------------------
+                    #  Train Generator
+                    # ---------------------
 
-            # Sample gaussian noise
-            z = np.random.normal(size=(batch_size, self.latent_dim))
+                    # Sample gaussian noise
+                    z = np.random.normal(size=(batch_size, self.latent_dim))
+                    # Select a random half batch of images
+                    idx = np.random.randint(0, X_train.shape[0], batch_size)
+                    imgs = X_train[idx]
 
-            # Select a random half batch of images
-            idx = np.random.randint(0, X_train.shape[0], batch_size)
-            imgs = X_train[idx]
+                    positive_y = np.ones((batch_size, 1))
+                    negative_y = -np.ones((batch_size, 1))
+                    # Train the generator (z -> img is valid and img -> z is is invalid)
+                    g_loss = self.bigan_generator.train_on_batch([z, imgs], [positive_y, negative_y])
 
-            valid = np.ones((batch_size, 1))
-            fake = np.zeros((batch_size, 1))
+                    # Clip encoder weights
+                    for l in self.encoder.layers:
+                        weights = l.get_weights()
+                        weights = [np.clip(w, -self.clip_value, self.clip_value) for w in weights]
+                        l.set_weights(weights)
 
-            # Train the generator (z -> img is valid and img -> z is is invalid)
-            for _ in range(50):
-                g_loss = self.bigan_generator.train_on_batch([z, imgs], [valid, fake])
-                if g_loss[0] < 5:
-                    break
+                    # Plot the progress
+                    print("%d [D loss: %f, acc: %.2f%%] [G loss: %f]" % (epoch, d_loss[0], 100 * d_loss[1], g_loss[0]))
+                    if iter_id % 15 == 0:
+                        g_losses.append(g_loss[0])
+                        d_losses.append(d_loss[0])
+                        losses_ratio.append(g_loss[0] / d_loss[0])
+                        self.save_losses_hist(g_losses, d_losses, losses_ratio)
 
-            # Plot the progress
-            print("%d [D loss: %f, acc: %.2f%%] [G loss: %f]" % (epoch, d_loss[0], 100 * d_loss[1], g_loss[0]))
-            if epoch % 15 == 0:
-                g_losses.append(g_loss[0])
-                d_losses.append(d_loss[0])
-                losses_ratio.append(g_loss[0] / d_loss[0])
-                self.save_losses_hist(g_losses, d_losses, losses_ratio)
-
-            # If at save interval => save generated image samples
-            if epoch % save_interval == 0:
-                print('Saving weights and images')
-                self.save_imgs(epoch)
-                self.save_weights(epoch)
+                    # If at save interval => save generated image samples
+                    if iter_id % save_interval == 0:
+                        print('Saving weights and images')
+                        self.save_imgs('{}_{}_{}'.format(epoch, segment_id, iter_id))
+            self.save_weights(epoch)
 
     def save_imgs(self, epoch):
         if self.random_samples is None:
