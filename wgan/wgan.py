@@ -23,6 +23,7 @@ import sys
 import numpy as np
 
 Z_DIMS = 100
+SEGMENT_SIZE = 100 * 1000
 
 
 def wasserstein_loss(y_true, y_pred):
@@ -214,85 +215,89 @@ class WGAN():
         # Load the dataset
         h5_file = h5py.File(dataset_path)
         dset = h5_file['images']
-        X_train = dset[:100000]
 
         half_batch = int(self.batch_size / 2)
 
         d_losses, g_losses, losses_ratio = [], [], []
         for epoch in range(self.last_epoch + 1, epochs):
-            for _ in range(self.n_critic):
+            for segment_id in range(dset.shape[0] // SEGMENT_SIZE):
+                print('Loading segment {}'.format(segment_id))
+                X_train = dset[segment_id * SEGMENT_SIZE: (segment_id + 1) * SEGMENT_SIZE]
+                for iter_id in range(SEGMENT_SIZE // half_batch):
+                    for _ in range(self.n_critic):
 
-                # ---------------------
-                #  Train Discriminator
-                # ---------------------
+                        # ---------------------
+                        #  Train Discriminator
+                        # ---------------------
 
-                if self.improved:
-                    half_batch = self.batch_size
+                        if self.improved:
+                            half_batch = self.batch_size
 
-                # Select a random half batch of images
-                idx = np.random.randint(0, X_train.shape[0], half_batch)
-                imgs = X_train[idx]
+                        # Select a random half batch of images
+                        idx = np.random.randint(0, X_train.shape[0], half_batch)
+                        imgs = X_train[idx]
 
-                if self.improved:
-                    # Improved WGAN - sample from uniform
-                    noise = np.random.uniform(0, 1, (half_batch, Z_DIMS))
-                else:
-                    noise = np.random.normal(0, 1, (half_batch, Z_DIMS))
+                        if self.improved:
+                            # Improved WGAN - sample from uniform
+                            noise = np.random.uniform(0, 1, (half_batch, Z_DIMS))
+                        else:
+                            noise = np.random.normal(0, 1, (half_batch, Z_DIMS))
 
-                # Generate a half batch of new images
-                gen_imgs = self.generator.predict(noise)
+                        # Generate a half batch of new images
+                        gen_imgs = self.generator.predict(noise)
 
-                # Train the discriminator
-                if not self.improved:
-                    positive_y = -np.ones((half_batch, 1))
-                    d_loss_real = self.discriminator.train_on_batch(imgs, positive_y)
-                    d_loss_fake = self.discriminator.train_on_batch(gen_imgs, np.ones((half_batch, 1)))
-                    d_loss = 0.5 * np.add(d_loss_fake, d_loss_real)
+                        # Train the discriminator
+                        if not self.improved:
+                            positive_y = -np.ones((half_batch, 1))
+                            d_loss_real = self.discriminator.train_on_batch(imgs, positive_y)
+                            d_loss_fake = self.discriminator.train_on_batch(gen_imgs, np.ones((half_batch, 1)))
+                            d_loss = 0.5 * np.add(d_loss_fake, d_loss_real)
 
-                    # Clip discriminator weights
-                    for l in self.discriminator.layers:
-                        weights = l.get_weights()
-                        weights = [np.clip(w, -self.clip_value, self.clip_value) for w in weights]
-                        l.set_weights(weights)
-                else:
-                    positive_y = np.ones((self.batch_size, 1), dtype=np.float32)
-                    negative_y = -positive_y
-                    dummy_y = np.zeros((self.batch_size, 1), dtype=np.float32)
-                    d_loss = self.discriminator_model.train_on_batch([imgs, noise], [positive_y, negative_y, dummy_y])
+                            # Clip discriminator weights
+                            for l in self.discriminator.layers:
+                                weights = l.get_weights()
+                                weights = [np.clip(w, -self.clip_value, self.clip_value) for w in weights]
+                                l.set_weights(weights)
+                        else:
+                            positive_y = np.ones((self.batch_size, 1), dtype=np.float32)
+                            negative_y = -positive_y
+                            dummy_y = np.zeros((self.batch_size, 1), dtype=np.float32)
+                            d_loss = self.discriminator_model.train_on_batch([imgs, noise],
+                                                                             [positive_y, negative_y, dummy_y])
 
-            # ---------------------
-            #  Train Generator
-            # ---------------------
+                    # ---------------------
+                    #  Train Generator
+                    # ---------------------
 
-            if self.improved:
-                # Improved WGAN - sample from uniform
-                noise = np.random.uniform(0, 1, (self.batch_size, Z_DIMS))
-            else:
-                noise = np.random.normal(0, 1, (self.batch_size, Z_DIMS))
+                    if self.improved:
+                        # Improved WGAN - sample from uniform
+                        noise = np.random.uniform(0, 1, (self.batch_size, Z_DIMS))
+                    else:
+                        noise = np.random.normal(0, 1, (self.batch_size, Z_DIMS))
 
-            # Train the generator
-            g_loss = self.combined.train_on_batch(noise, positive_y)
+                    # Train the generator
+                    g_loss = self.combined.train_on_batch(noise, positive_y)
 
-            # Plot the progress
-            if self.improved:
-                g_loss = g_loss[0]
-                d_loss = sum(d_loss)
-                print("%d [D loss: %f] [G loss: %f]" % (epoch, d_loss, g_loss))
+                    # Plot the progress
+                    if self.improved:
+                        g_loss = g_loss[0]
+                        d_loss = sum(d_loss)
+                        print("%d %d %d [D loss: %f] [G loss: %f]" % (epoch, segment_id, iter_id, d_loss, g_loss))
 
-            else:
-                d_loss = 1 - d_loss[0]
-                g_loss = 1 - g_loss[0]
-                print("%d [D loss: %f] [G loss: %f]" % (epoch, d_loss, g_loss))
-            if epoch % 5 == 0:
-                g_losses.append(g_loss)
-                d_losses.append(d_loss)
-                losses_ratio.append(g_losses[-1] / d_losses[-1])
-                self.save_losses_hist(g_losses, d_losses, losses_ratio)
+                    else:
+                        d_loss = 1 - d_loss[0]
+                        g_loss = 1 - g_loss[0]
+                        print("%d %d %d [D loss: %f] [G loss: %f]" % (epoch, segment_id, iter_id, d_loss, g_loss))
+                    if iter_id % 5 == 0:
+                        g_losses.append(g_loss)
+                        d_losses.append(d_loss)
+                        losses_ratio.append(g_losses[-1] / d_losses[-1])
+                        self.save_losses_hist(g_losses, d_losses, losses_ratio)
 
-            # If at save interval => save generated image samples
-            if epoch % save_interval == 0:
-                self.save_imgs(epoch)
-                self.save_weights(epoch)
+                    # If at save interval => save generated image samples
+                    if iter_id % save_interval == 0 and iter_id > 0:
+                        self.save_imgs('{}_{}_{}'.format(epoch, segment_id, iter_id))
+            self.save_weights(epoch)
 
     def save_imgs(self, epoch):
         r, c = 5, 5
